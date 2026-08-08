@@ -1,1 +1,374 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+#include <VL53L0X.h>
 
+// =====================================================
+// Wi-Fi Configuration
+// =====================================================
+
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+// Laptop running Flask
+const char* SERVER_URL = "http://YOUR_LAPTOP_IP:5000/update";
+
+// =====================================================
+// Pin Configuration
+// =====================================================
+
+// Ultrasonic Sensor
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+
+// Vibration Sensor
+#define VIBRATION_PIN 19
+
+// Battery voltage ADC
+#define BATTERY_PIN 34
+
+// I2C pins for ToF sensor
+#define SDA_PIN 21
+#define SCL_PIN 22
+
+// =====================================================
+// ToF Sensor
+// =====================================================
+
+VL53L0X tof;
+
+// =====================================================
+// Variables
+// =====================================================
+
+float ultrasonicDistance = 0;
+uint16_t tofDistance = 0;
+
+int vibrationState = 0;
+float vibrationValue = 0;
+
+float batteryVoltage = 0;
+int batteryPercentage = 0;
+
+String robotStatus = "AUTO";
+String trackStatus = "OK";
+
+unsigned long lastSendTime = 0;
+
+const unsigned long SEND_INTERVAL = 1000;
+
+// =====================================================
+// Wi-Fi Connection
+// =====================================================
+
+void connectWiFi()
+{
+    Serial.print("Connecting to Wi-Fi");
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println();
+    Serial.println("Wi-Fi Connected!");
+
+    Serial.print("ESP32 IP Address: ");
+    Serial.println(WiFi.localIP());
+}
+
+// =====================================================
+// Ultrasonic Sensor
+// =====================================================
+
+float readUltrasonic()
+{
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+    if (duration == 0)
+        return -1;
+
+    float distance = duration * 0.0343 / 2.0;
+
+    return distance;
+}
+
+// =====================================================
+// Vibration Sensor
+// =====================================================
+
+void readVibration()
+{
+    vibrationState = digitalRead(VIBRATION_PIN);
+
+    if (vibrationState == HIGH)
+    {
+        vibrationValue = 1;
+    }
+    else
+    {
+        vibrationValue = 0;
+    }
+}
+
+// =====================================================
+// ToF Sensor
+// =====================================================
+
+void readTOF()
+{
+    tofDistance = tof.readRangeContinuousMillimeters();
+
+    if (tof.timeoutOccurred())
+    {
+        tofDistance = 0;
+    }
+}
+
+// =====================================================
+// Battery Measurement
+// =====================================================
+
+void readBattery()
+{
+    int adcValue = analogRead(BATTERY_PIN);
+
+    /*
+       Adjust this calculation according to
+       your actual voltage-divider circuit.
+    */
+
+    batteryVoltage = (adcValue / 4095.0) * 3.3 * 2.0;
+
+    batteryPercentage =
+        map(
+            constrain(batteryVoltage * 100, 300, 420),
+            300,
+            420,
+            0,
+            100
+        );
+
+    batteryPercentage = constrain(batteryPercentage, 0, 100);
+}
+
+// =====================================================
+// Track Condition Analysis
+// =====================================================
+
+void analyzeTrack()
+{
+    trackStatus = "OK";
+
+    /*
+       Example threshold logic.
+
+       These values MUST be calibrated using
+       actual track/prototype measurements.
+    */
+
+    if (vibrationValue > 0)
+    {
+        trackStatus = "CRITICAL";
+    }
+
+    if (ultrasonicDistance > 0 &&
+        ultrasonicDistance < 5)
+    {
+        trackStatus = "CRITICAL";
+    }
+
+    if (tofDistance > 0 &&
+        tofDistance < 50)
+    {
+        trackStatus = "CRITICAL";
+    }
+}
+
+// =====================================================
+// Send Data to Flask
+// =====================================================
+
+void sendDataToServer()
+{
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.println("Wi-Fi disconnected!");
+        return;
+    }
+
+    HTTPClient http;
+
+    http.begin(SERVER_URL);
+
+    http.addHeader(
+        "Content-Type",
+        "application/json"
+    );
+
+    String jsonData = "{";
+
+    jsonData += "\"status\":\"";
+    jsonData += trackStatus;
+    jsonData += "\",";
+
+    jsonData += "\"tilt\":0,";
+
+    jsonData += "\"vibration\":";
+    jsonData += String(vibrationValue);
+    jsonData += ",";
+
+    jsonData += "\"lat\":0,";
+
+    jsonData += "\"lon\":0,";
+
+    jsonData += "\"battery\":";
+    jsonData += String(batteryPercentage);
+    jsonData += ",";
+
+    jsonData += "\"network\":\"WiFi\",";
+
+    jsonData += "\"signal\":";
+    jsonData += String(WiFi.RSSI());
+    jsonData += ",";
+
+    jsonData += "\"robot_status\":\"";
+    jsonData += robotStatus;
+    jsonData += "\",";
+
+    jsonData += "\"recheck\":0,";
+
+    jsonData += "\"tof\":";
+    jsonData += String(tofDistance);
+    jsonData += ",";
+
+    jsonData += "\"distance\":";
+    jsonData += String(ultrasonicDistance);
+
+    jsonData += "}";
+
+    Serial.println();
+    Serial.println("Sending data to Flask:");
+    Serial.println(jsonData);
+
+    int httpResponseCode =
+        http.POST(jsonData);
+
+    Serial.print("HTTP Response: ");
+    Serial.println(httpResponseCode);
+
+    http.end();
+}
+
+// =====================================================
+// Print Sensor Data
+// =====================================================
+
+void printSensorData()
+{
+    Serial.println();
+    Serial.println("========== TRACK MONITOR ==========");
+
+    Serial.print("Ultrasonic : ");
+    Serial.print(ultrasonicDistance);
+    Serial.println(" cm");
+
+    Serial.print("ToF        : ");
+    Serial.print(tofDistance);
+    Serial.println(" mm");
+
+    Serial.print("Vibration  : ");
+    Serial.println(vibrationValue);
+
+    Serial.print("Battery    : ");
+    Serial.print(batteryPercentage);
+    Serial.println(" %");
+
+    Serial.print("Track      : ");
+    Serial.println(trackStatus);
+
+    Serial.print("Wi-Fi RSSI : ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+
+    Serial.println("===================================");
+}
+
+// =====================================================
+// Setup
+// =====================================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+
+    pinMode(VIBRATION_PIN, INPUT);
+
+    analogReadResolution(12);
+
+    Wire.begin(SDA_PIN, SCL_PIN);
+
+    // Initialize ToF
+    if (!tof.init())
+    {
+        Serial.println("ToF sensor not detected!");
+    }
+    else
+    {
+        Serial.println("ToF sensor initialized.");
+        tof.setTimeout(500);
+        tof.startContinuous();
+    }
+
+    // Connect Wi-Fi
+    connectWiFi();
+
+    Serial.println();
+    Serial.println("Railway Track Monitoring System");
+    Serial.println("ESP32 System Started");
+}
+
+// =====================================================
+// Main Loop
+// =====================================================
+
+void loop()
+{
+    // Read sensors
+    ultrasonicDistance = readUltrasonic();
+
+    readVibration();
+
+    readTOF();
+
+    readBattery();
+
+    // Analyze condition
+    analyzeTrack();
+
+    // Display data
+    printSensorData();
+
+    // Send data every 1 second
+    if (millis() - lastSendTime >= SEND_INTERVAL)
+    {
+        lastSendTime = millis();
+
+        sendDataToServer();
+    }
+
+    delay(100);
+}
